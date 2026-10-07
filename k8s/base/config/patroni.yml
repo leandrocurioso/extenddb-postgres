@@ -1,0 +1,60 @@
+# Patroni configuration shared by every cell. Per-cell identity comes from the
+# environment (PATRONI_NAME = namespace, connect addresses = pod IP).
+scope: extenddb-pg
+namespace: /service/
+
+consul:
+  # Each cell talks to its own Consul server; the three servers form one Raft
+  # cluster, so leader locks are cluster-wide.
+  host: consul:8500
+  register_service: true
+
+restapi:
+  listen: 0.0.0.0:8008
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    # Keep the primary up through a Consul outage as long as it can still
+    # reach every other member over the REST API.
+    failsafe_mode: true
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        # 3 ExtendDB instances x (2 x pool_size 10 + catalog_pool_size 10) = 90,
+        # plus Patroni, replication and migrations.
+        max_connections: 300
+        password_encryption: scram-sha-256
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 256MB
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/data/pgdata
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+    replication:
+      username: replicator
+  pg_hba:
+    - local all all trust
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

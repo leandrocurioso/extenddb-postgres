@@ -1,0 +1,117 @@
+# Creates the "clients" account and one IAM user per cell for clients-api,
+# scoped to the Clients table, and imports the access keys that
+# scripts/deploy.sh generated (so the keys are known before the apps start).
+# Idempotent: "already exists" (HTTP 409) answers are treated as success.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: extenddb-provision
+  labels:
+    app.kubernetes.io/name: extenddb-provision
+    app.kubernetes.io/component: extenddb-bootstrap
+spec:
+  backoffLimit: 30
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: extenddb-provision
+        app.kubernetes.io/component: extenddb-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        cell: cell-1
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          image: ghcr.io/extenddb/extenddb-postgres:0.1.13
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # manage only reads the TLS cert path from this file.
+              cat > "$HOME/extenddb.toml" <<'TOML'
+              [server]
+              bind_addr = "0.0.0.0"
+              [server.tls]
+              cert_path = "/etc/extenddb/tls/cert.pem"
+              key_path = "/etc/extenddb/tls/key.pem"
+              [storage]
+              backend = "postgres"
+              [storage.postgres]
+              connection_string = "postgresql://unused@pg-primary:5432/extenddb_catalog"
+              TOML
+              chmod 600 "$HOME/extenddb.toml"
+
+              manage() {
+                extenddb manage --config "$HOME/extenddb.toml" \
+                  --endpoint https://extenddb:18443 --user admin "$@"
+              }
+              # Run a manage command; treat HTTP 409 (already exists) as done.
+              # Only the subcommand name is logged, never its arguments.
+              ensure() {
+                if out=$(manage "$@" 2>&1); then
+                  echo "ok: $1"
+                elif echo "$out" | grep -q 'HTTP 409'; then
+                  echo "exists: $1"
+                else
+                  echo "failed: $1: $out" >&2
+                  return 1
+                fi
+              }
+
+              ensure create-account --account-id "$ACCOUNT_ID" --account-name clients
+
+              for cell in cell-1 cell-2 cell-3; do
+                user="clients-api-$cell"
+                var=$(echo "$cell" | tr 'a-z-' 'A-Z_')
+                key_id=$(printenv "${var}_ACCESS_KEY_ID")
+                secret=$(printenv "${var}_SECRET_ACCESS_KEY")
+
+                ensure create-user --account-id "$ACCOUNT_ID" --user-name "$user"
+                ensure put-user-policy --account-id "$ACCOUNT_ID" --user-name "$user" \
+                  --policy-name ClientsTableAccess --policy-document "{
+                    \"Version\": \"2012-10-17\",
+                    \"Statement\": [{
+                      \"Effect\": \"Allow\",
+                      \"Action\": \"dynamodb:*\",
+                      \"Resource\": [
+                        \"arn:aws:dynamodb:*:$ACCOUNT_ID:table/Clients\",
+                        \"arn:aws:dynamodb:*:$ACCOUNT_ID:table/Clients/*\"
+                      ]
+                    }]
+                  }"
+                ensure import-access-key --account-id "$ACCOUNT_ID" --user-name "$user" \
+                  --access-key-id "$key_id" --secret-access-key "$secret" --yes
+                echo "provisioned $user ($key_id)"
+              done
+          env:
+            - name: HOME
+              value: /work
+            - name: ACCOUNT_ID
+              value: "111122223333"
+            - name: EXTENDDB_PASSWORD
+              valueFrom: { secretKeyRef: { name: extenddb-admin, key: password } }
+          envFrom:
+            # CELL_<N>_ACCESS_KEY_ID / CELL_<N>_SECRET_ACCESS_KEY for all cells.
+            - secretRef:
+                name: clients-api-keys
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: work, mountPath: /work }
+            - { name: tls, mountPath: /etc/extenddb/tls, readOnly: true }
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: extenddb-tls
+            defaultMode: 0440

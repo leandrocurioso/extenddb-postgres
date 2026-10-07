@@ -1,0 +1,23 @@
+# Cell 2: namespace cell-2, scheduled on the k3d node labelled cell=cell-2.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cell-2
+
+labels:
+  - pairs:
+      cell: cell-2
+    includeTemplates: true
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+patches:
+  - target:
+      kind: (StatefulSet|Deployment)
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          cell: cell-2

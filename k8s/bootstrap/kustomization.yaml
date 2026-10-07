@@ -1,0 +1,16 @@
+# One-time, cluster-wide setup. Runs from cell-1 only; every cell then shares
+# the resulting catalog, encryption key and IAM users through Postgres.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cell-1
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: extenddb-cells
+      cell: cell-1
+    includeTemplates: true
+
+resources:
+  - extenddb-init-job.yaml
+  - extenddb-provision-job.yaml

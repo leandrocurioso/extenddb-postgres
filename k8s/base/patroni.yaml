@@ -1,0 +1,98 @@
+# One Patroni-managed PostgreSQL member per cell. All three share the scope
+# "extenddb-pg" and elect a single primary through Consul; the others stream
+# from it as replicas.
+apiVersion: v1
+kind: Service
+metadata:
+  name: patroni
+  labels:
+    app.kubernetes.io/name: patroni
+    app.kubernetes.io/component: postgres
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: patroni
+  ports:
+    - { name: postgres, port: 5432 }
+    - { name: patroni-api, port: 8008 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: patroni
+  labels:
+    app.kubernetes.io/name: patroni
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: patroni
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: patroni
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: patroni
+        app.kubernetes.io/component: postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        # Without this the kubelet re-applies fsGroup recursively on every
+        # mount, leaving pgdata g+rwx, and postgres refuses to start on any
+        # pod restart ("data directory has invalid permissions").
+        fsGroupChangePolicy: OnRootMismatch
+        runAsNonRoot: true
+      containers:
+        - name: patroni
+          image: extenddb-lab/patroni:4.1.5-pg17
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # Member name = cell name, so `patronictl list` reads as a cell map.
+            - name: PATRONI_NAME
+              value: $(NAMESPACE)
+            - name: PATRONI_RESTAPI_CONNECT_ADDRESS
+              value: $(POD_IP):8008
+            - name: PATRONI_POSTGRESQL_CONNECT_ADDRESS
+              value: $(POD_IP):5432
+            - name: PATRONI_SUPERUSER_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-credentials, key: superuser-password } }
+            - name: PATRONI_REPLICATION_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-credentials, key: replication-password } }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+            - { name: patroni-api, containerPort: 8008 }
+          readinessProbe:
+            httpGet: { path: /readiness, port: 8008 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /liveness, port: 8008 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/patroni, readOnly: true }
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: config
+          configMap:
+            name: patroni-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

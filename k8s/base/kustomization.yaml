@@ -1,0 +1,29 @@
+# Everything one cell runs. Cells are identical; per-cell identity comes from
+# the namespace (overlays in ../cells/) via the downward API.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: extenddb-cells
+
+resources:
+  - consul.yaml
+  - patroni.yaml
+  - pg-router.yaml
+  - extenddb.yaml
+  - clients-api.yaml
+
+configMapGenerator:
+  - name: patroni-config
+    files: [config/patroni.yml]
+    options:
+      labels: { app.kubernetes.io/component: postgres }
+  - name: pg-router-config
+    files: [config/haproxy.cfg]
+    options:
+      labels: { app.kubernetes.io/component: pg-router }
+  - name: extenddb-config
+    files: [config/extenddb.toml]
+    options:
+      labels: { app.kubernetes.io/component: extenddb }

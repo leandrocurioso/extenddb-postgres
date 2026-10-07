@@ -1,0 +1,93 @@
+# ExtendDB (DynamoDB-compatible API) in each cell, backed by the shared
+# Patroni cluster through the cell-local pg-primary router.
+apiVersion: v1
+kind: Service
+metadata:
+  name: extenddb
+  labels:
+    app.kubernetes.io/name: extenddb
+    app.kubernetes.io/component: extenddb
+spec:
+  selector:
+    app.kubernetes.io/name: extenddb
+  ports:
+    - { name: https, port: 18443, targetPort: 18443 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: extenddb
+  labels:
+    app.kubernetes.io/name: extenddb
+    app.kubernetes.io/component: extenddb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: extenddb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: extenddb
+        app.kubernetes.io/component: extenddb
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # The server rejects a config file readable by group/other and cannot
+        # chmod a read-only ConfigMap mount, so copy it to a 0600 file.
+        - name: config
+          image: ghcr.io/extenddb/extenddb-postgres:0.1.13
+          command: ["/bin/sh", "-ec", "install -m 0600 /config/extenddb.toml /var/lib/extenddb/extenddb.toml"]
+          securityContext: &hardened
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: state, mountPath: /var/lib/extenddb }
+      containers:
+        - name: extenddb
+          image: ghcr.io/extenddb/extenddb-postgres:0.1.13
+          args: ["serve", "--config", "/var/lib/extenddb/extenddb.toml", "--foreground"]
+          env:
+            - name: PG_APP_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-credentials, key: app-password } }
+            - name: EXTENDDB__STORAGE__POSTGRES__CONNECTION_STRING
+              value: postgresql://extenddb_app:$(PG_APP_PASSWORD)@pg-primary:5432/extenddb_catalog
+          ports:
+            - { name: https, containerPort: 18443 }
+          readinessProbe:
+            tcpSocket: { port: 18443 }
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["extenddb", "healthcheck", "--config", "/var/lib/extenddb/extenddb.toml"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext: *hardened
+          volumeMounts:
+            - { name: state, mountPath: /var/lib/extenddb }
+            - { name: tls, mountPath: /etc/extenddb/tls, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap:
+            name: extenddb-config
+        - name: tls
+          secret:
+            secretName: extenddb-tls
+            defaultMode: 0440
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }

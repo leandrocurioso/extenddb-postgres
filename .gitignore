@@ -1,0 +1,3 @@
+# Generated credentials and certificates (scripts/deploy.sh)
+.secrets/
+app/clients-api

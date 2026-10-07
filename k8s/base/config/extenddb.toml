@@ -1,0 +1,31 @@
+# ExtendDB server config shared by every cell. It carries no secrets: the
+# connection string (with password) is injected through
+# EXTENDDB__STORAGE__POSTGRES__CONNECTION_STRING, and the AES key for stored
+# credentials lives in the catalog database, so all cells share one identity
+# store. The init container copies this file to a 0600 path because the
+# server refuses group/other-readable config files.
+
+[server]
+bind_addr = "0.0.0.0"
+port = 18443
+region = "us-east-1"
+
+[server.tls]
+cert_path = "/etc/extenddb/tls/cert.pem"
+key_path = "/etc/extenddb/tls/key.pem"
+
+[storage]
+backend = "postgres"
+
+[storage.postgres]
+# "pg-primary" resolves to the cell-local HAProxy in every namespace.
+connection_string = "postgresql://extenddb_app@pg-primary:5432/extenddb_catalog"
+pool_size = 10
+catalog_pool_size = 10
+
+[auth]
+provider = "builtin"
+
+[logging]
+level = "info"
+format = "json"
